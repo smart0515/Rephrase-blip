@@ -137,7 +137,7 @@ class RunnerBase:
 
         if amp:
             if self._scaler is None:
-                self._scaler = torch.cuda.amp.GradScaler()
+                self._scaler = torch.amp.GradScaler('cuda',enabled=True)
 
         return self._scaler
 
@@ -299,7 +299,7 @@ class RunnerBase:
 
     @property
     def accum_grad_iters(self):
-        return int(self.config.run_cfg.get("accum_grad_iters", 1))
+        return int(self.config.run_cfg.get("accum_grad_iters", 16)) # 1->8->16
 
     @property
     def valid_splits(self):
@@ -496,7 +496,7 @@ class RunnerBase:
         is_trains,
         collate_fns,
         dataset_ratios=None,
-    ):
+        ):
         """
         Create dataloaders for training and validation.
         """

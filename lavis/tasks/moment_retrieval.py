@@ -193,8 +193,8 @@ class MomentRetrievalTask(BaseTask):
         start_iters=None,
         log_freq=50,
         cuda_enabled=False,
-        accum_grad_iters=1,
-    ):
+        accum_grad_iters=16, # 1->8->16
+        ):
         """
         An inner training loop compatible with both epoch-based and iter-based training.
 
@@ -210,7 +210,9 @@ class MomentRetrievalTask(BaseTask):
         metric_logger = MetricLogger(delimiter="  ")
         metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
         metric_logger.add_meter("loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
-
+        metric_logger.add_meter("pseudo_query_loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
+        metric_logger.add_meter("pseudo_loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
+        
         # if iter-based runner, schedule lr based on inner epoch.
         logging.info(
             "Start training epoch {}, {} iters per inner epoch.".format(
@@ -244,8 +246,15 @@ class MomentRetrievalTask(BaseTask):
 
             lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                loss = self.train_step(model=model, samples=samples)
+            # RuntimeError: "_amp_foreach_non_finite_check_and_unscale_cuda" not implemented for 'BFloat16'
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                loss_dict = self.train_step(model=model, samples=samples)
+                
+            # loss_dict = self.train_step(model=model, samples=samples)
+
+            loss = loss_dict['loss']
+            pseudo_query_loss = loss_dict.get('pseudo_query_loss', 0)
+            pseudo_loss = loss_dict.get('pseudo_loss', 0)
 
             # after_train_step()
             if use_amp:
@@ -263,28 +272,39 @@ class MomentRetrievalTask(BaseTask):
                 optimizer.zero_grad()
 
             metric_logger.update(loss=loss.item())
+            metric_logger.update(pseudo_query_loss=pseudo_query_loss)
+            metric_logger.update(pseudo_loss=pseudo_loss)
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-            # log to wandb
             if is_main_process() and wandb.run is not None:
                 wandb.log(
                     {
                         "train/lr": optimizer.param_groups[0]["lr"],
+                        "train/loss": loss.item(),
+                        "train/pseudo_query_loss": pseudo_query_loss,
+                        "train/pseudo_loss": pseudo_loss,
                     }
                 )
 
-            # print("breaking in train_inner_loop in moment_retrieval.py")
-            # break
-
-        # after train_epoch()
-        # gather the stats from all processes
         metric_logger.synchronize_between_processes()
         logging.info("Averaged stats: " + str(metric_logger.global_avg()))
-
         return {
             k: "{:.3f}".format(meter.global_avg)
             for k, meter in metric_logger.meters.items()
         }
+
+    def train_step(self, model, samples):
+        
+        # RuntimeError: "_amp_foreach_non_finite_check_and_unscale_cuda" not implemented for 'BFloat16'
+    #     samples = {
+    #     k: v.to(torch.bfloat16) if isinstance(v, torch.Tensor) and torch.is_floating_point(v)
+    #     else [t.to(torch.bfloat16) if isinstance(t, torch.Tensor) and torch.is_floating_point(t) else t for t in v] if isinstance(v, list)
+    #     else v
+    #     for k, v in samples.items()
+    # }
+
+        output = model(samples)
+        return output
 
     def moment_str_to_list(self, m):
         """Convert a string of moments to a list of moments.

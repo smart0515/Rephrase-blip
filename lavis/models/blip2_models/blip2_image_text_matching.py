@@ -34,7 +34,9 @@ class Blip2ITM(Blip2Qformer):
         num_query_token=32,
         embed_dim=256,
         max_txt_len=32,
-    ):
+        
+        ):
+        
         super().__init__(
             img_size=img_size,
             drop_path_rate=drop_path_rate,

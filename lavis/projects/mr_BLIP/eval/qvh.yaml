@@ -7,7 +7,7 @@ model:
   arch: blip2_mr
   model_type: pretrain_flant5xl
   load_finetuned: True
-  finetuned: "mr_BLIP_checkpoints/QVH/checkpoint_best.pth"
+  finetuned: "/home/jejekim/mr-Blip/lavis/result/mr_BLIP/QVH/QVH_150_1/checkpoint_best.pth"   # edited by je
   use_grad_checkpoint: False
   freeze_vit: True
   task: qformer_freeze_lora
@@ -20,7 +20,7 @@ datasets:
     vis_processor:
         eval:
           name: "blip_video_eval"
-          n_frms: 60
+          n_frms: 30              # edited by je
           image_size: 224
     text_processor:
         eval:
@@ -44,7 +44,7 @@ run:
   output_dir: "result/mr_BLIP/QVH/eval"
 
   evaluate: True
-  test_splits: ["val"]
+  test_splits: ["val"] 
 
   # distribution-specific
   device: "cuda"
@@ -55,4 +55,4 @@ run:
 
   wandb: False
   wandb_project: "mr_BLIP2"
-  wandb_name: "QVH_eval"
+  wandb_name: "QVH_eval_1_val4"

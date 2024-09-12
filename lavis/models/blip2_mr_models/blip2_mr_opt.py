@@ -65,7 +65,8 @@ class Blip2_OPT_MR(Blip2Base):
         input_time_format="seconds_integers",
         interleave_data=False,
         task="lora",
-    ):
+        ):
+        
         super().__init__()
 
         self.task = task
@@ -333,7 +334,9 @@ class Blip2_OPT_MR(Blip2Base):
         length_penalty=1.0,
         num_captions=1,
         temperature=1,
-    ):
+        
+        ):
+        
         """
         Args:
             samples (dict): A dictionary containing the following keys:
@@ -593,7 +596,8 @@ class Blip2_OPT_MR(Blip2Base):
         video_prompt_end,
         query_prompt,
         task_prompt,
-    ):
+        
+        ):
 
         ### video prompt
         # [t1, t2, t3, ..., duration]
@@ -1134,7 +1138,8 @@ class Blip2_OPT_MR(Blip2Base):
         self,
         tokenizer=AutoTokenizer.from_pretrained("facebook/opt-2.7b", use_fast=False),
         range_end=300,
-    ):
+        
+        ):
         """
         Find numbers that are tokenized in more than one token by the Opt tokenizer.
 

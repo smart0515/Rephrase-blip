@@ -111,8 +111,8 @@ class BaseTask:
         scaler=None,
         cuda_enabled=False,
         log_freq=50,
-        accum_grad_iters=1,
-    ):
+        accum_grad_iters=16, # 1->8->16
+        ):
         return self._train_inner_loop(
             epoch=epoch,
             iters_per_epoch=len(data_loader),
@@ -138,8 +138,8 @@ class BaseTask:
         scaler=None,
         cuda_enabled=False,
         log_freq=50,
-        accum_grad_iters=1,
-    ):
+        accum_grad_iters=16, # 1->8->16
+        ):
         return self._train_inner_loop(
             epoch=epoch,
             start_iters=start_iters,
@@ -166,8 +166,8 @@ class BaseTask:
         start_iters=None,
         log_freq=50,
         cuda_enabled=False,
-        accum_grad_iters=1,
-    ):
+        accum_grad_iters=16, # 1->8->16
+        ):
         """
         An inner training loop compatible with both epoch-based and iter-based training.
 

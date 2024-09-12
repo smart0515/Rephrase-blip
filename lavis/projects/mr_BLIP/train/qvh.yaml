@@ -6,7 +6,11 @@
 model:
   arch: blip2_mr
   model_type: pretrain_flant5xl
-  load_finetuned: False # True
+  # load_finetuned: False # True
+  ##
+  load_finetuned: False
+  finetuned: "/home/jejekim/mr-Blip/lavis/result/mr_BLIP/QVH/QVH_150_1/checkpoint_best.pth"   # edited by je
+  ##
   use_grad_checkpoint: False
   freeze_vit: True
   task: qformer_freeze_lora
@@ -19,11 +23,11 @@ datasets:
     vis_processor:
         train:
           name: "blip2_video_train"
-          n_frms: 60
+          n_frms: 30  # 30->20
           image_size: 224
         eval:
           name: "blip_video_eval"
-          n_frms: 60
+          n_frms: 30  # 30->20
           image_size: 224
     text_processor:
         train:
@@ -41,13 +45,14 @@ run:
   min_lr: 0
   warmup_lr: 1e-8
   # warmup_steps: 4515 # 903 iters/ epoch * 50 epochs * 0.1 = 4515
-  warmup_steps: 2255 # 451 iters/ epoch * 50 epochs * 0.1 = 2255
+  # mg_warmup :  # 1805 iters / 20 epoch * 0.1 = 3600 -> 배치가 작으면 좀 더 길게
+  warmup_steps: 1600 # 451 iters/ epoch * 50 epochs * 0.1 = 2255   -> 1600까지 줄여보자
   weight_decay: 0.05
-  max_epoch: 50
-  batch_size_train: 2
-  batch_size_eval: 2
+  max_epoch: 30
+  batch_size_train: 1
+  batch_size_eval: 1
   num_workers: 8
-  accum_grad_iters: 2
+  accum_grad_iters: 4
 
   max_len: 200
   min_len: 8
@@ -72,4 +77,4 @@ run:
 
   wandb: True
   wandb_project: "mr_BLIP"
-  wandb_name: "QVH_150"
+  wandb_name: "test"

@@ -120,6 +120,8 @@ class Blip2FMR(Blip2Base):
             encoder_attention_mask=image_atts, return_dict=True)
         inputs_t5 = self.t5_proj_loc(query_output.last_hidden_state)
         atts_t5 = torch.ones(inputs_t5.size()[:-1], dtype=torch.long).to(image.device) 
+        
+
 
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             # Frame Prefix
@@ -156,6 +158,9 @@ class Blip2FMR(Blip2Base):
                 decoder_attention_mask=output_tokens_mask, return_dict=True, labels=targets)
             loss = outputs.loss
                 
+                
+            #ipdb.set_trace()
+
         return {"loss": loss}
         
     @torch.no_grad()
@@ -265,7 +270,8 @@ class Blip2FMR(Blip2Base):
         prompt="",
         length_penalty=-1,
         **kwargs
-    ):
+        ):
+        
         image = samples["image"]
         with torch.cuda.amp.autocast(enabled=(self.device != torch.device("cpu"))):
             image_embeds = self.ln_vision_loc(self.visual_encoder(image))
@@ -286,7 +292,7 @@ class Blip2FMR(Blip2Base):
 
         if isinstance(samples["text_input"], str):
             samples["text_input"] = [samples["text_input"]]
-        if prompt:
+        if prompt:  # ["Q: What is your name? A:", "Q: How old are you? A:"]
             text_input = [prompt.format(question) for question in samples["text_input"]]
         else:
             text_input = samples["text_input"]

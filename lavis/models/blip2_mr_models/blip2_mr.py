@@ -10,17 +10,22 @@ import logging
 import os
 import sys
 import re
+import pdb
+import ipdb
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast as autocast
+from torch.amp import autocast
 from transformers import T5TokenizerFast
 from peft import LoraConfig, get_peft_model
 import wandb
-
 sys.path.append(sys.path[0] + "/..")
 from lavis.common.registry import registry
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
+
+from PIL import Image
+from lavis.processors import load_processor
+
 from lavis.models.blip2_models.modeling_t5 import T5Config, T5ForConditionalGeneration
 from lavis.common.dist_utils import is_main_process
 from lavis.models.blip2_mr_models.utils import (
@@ -32,6 +37,19 @@ from lavis.models.blip2_mr_models.utils import (
     get_timestamps_as_relative_floats,
     get_timestamps_as_framenumbers,
 )
+
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
 
 # set the environment variable TOKENIZERS_PARALLELISM = false
 # to disable tokenizers parallelism
@@ -74,7 +92,7 @@ class BLIP2_MR(Blip2Base):
         interleave_data=False,
         frame_token_aggregation=None,
         task="lora",
-    ):
+        ):
         """
         apply_lemmatizer: when set to True, postprocess predict_answers() result with lemmas.
         """
@@ -166,8 +184,20 @@ class BLIP2_MR(Blip2Base):
             # freeze T5
             for name, param in self.t5_model.named_parameters():
                 param.requires_grad = False
-                param.data = param.data.bfloat16()
-
+                param.data = param.data.float32()
+                
+        
+        # 캡셔닝을 위한 LoRA 설정
+        caption_lora_config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q", "v"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        self.caption_model = get_peft_model(self.t5_model, caption_lora_config)
+        
         ##########################################################################
 
         ### Q-Former for Image Embeddings ########################################
@@ -184,6 +214,7 @@ class BLIP2_MR(Blip2Base):
         self.t5_proj = nn.Linear(
             self.Qformer.config.hidden_size, self.t5_model.config.hidden_size
         )
+        self.t5_proj = self.t5_proj.to(torch.float32)
 
         ##########################################################################
 
@@ -198,6 +229,7 @@ class BLIP2_MR(Blip2Base):
         self.seperator_token = self.t5_tokenizer.convert_tokens_to_ids(">")
         self.pad_token_id = self.t5_tokenizer.pad_token_id
 
+
         if "qformer_freeze" in self.task:
             for name, param in self.Qformer.named_parameters():
                 param.requires_grad = False
@@ -210,11 +242,17 @@ class BLIP2_MR(Blip2Base):
             if not "qformer_freeze" in self.task:
                 wandb.watch(self.Qformer, log="all")
                 wandb.watch(self.t5_proj, log="all")
+        
+        # vis_processors 초기화
+        self.vis_processors = {
+            "eval": load_processor("blip_image_eval").build(image_size=224)
+        }
+        
 
     def forward(
         self,
         samples,
-    ):
+        ):
         image = samples["video"]
         timestamps, durations = (
             samples["timestamps"],
@@ -227,12 +265,13 @@ class BLIP2_MR(Blip2Base):
         # uniform sampling
         b, t, c, w, h = image.shape
         image = image.reshape(-1, c, w, h)
-        with torch.cuda.amp.autocast(enabled=(self.device != torch.device("cpu"))):
+        with torch.amp.autocast('cuda',enabled=(self.device != torch.device("cpu")), dtype=torch.float32):
             image_embeds = self.ln_vision(self.visual_encoder(image))  # bt, n, c
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
             image.device
         )  # bt n c
 
+        # ipdb.set_trace()
         ### Apply Q-Former for Image Embeddings ####################################
         query_tokens_qa = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         frames_after_qformer = self.Qformer.bert(
@@ -263,7 +302,7 @@ class BLIP2_MR(Blip2Base):
         )  # b, t * n, c
         frames_atts_for_t5 = frames_atts_for_t5.reshape(b, -1)  # b, t * n
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda',dtype=torch.float32):
             inputs_embs_mr, inputs_atts_mr, video_prompt = self.prompt_concatenation(
                 timestamps,
                 durations,
@@ -295,12 +334,137 @@ class BLIP2_MR(Blip2Base):
                 return_dict=True,
                 labels=targets_mr,
             )
-            loss = outputs_loc.loss
+            #import ipdb
+            
+            #ForkedPdb().set_trace()
+            
+            loss1 = outputs_loc.loss
+            
+            # ipdb.set_trace()
+            
+            ############### edited by mingyu #################
+            # Keyframe 이미지를 이용한 pseudo query 생성
+            batch_size = len(samples['query_id'])
+            keyframe_images = []
+            for i in range(batch_size):
+                keyframe_path = f"extracted_frames/frame_qid {samples['query_id'][i].split('_')[-1]}.jpg"
+                keyframe_image = Image.open(keyframe_path).convert('RGB')
+                keyframe_image = self.vis_processors["eval"](keyframe_image)
+                keyframe_images.append(keyframe_image)
+            keyframe_images = torch.stack(keyframe_images).to(self.device)
 
+            # 키프레임 이미지 인코딩 및 pseudo query 생성
+            image_embeds = self.ln_vision(self.visual_encoder(keyframe_images))
+            image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(self.device)
+            query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+            
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+            )
+                
+            # query_output_half = query_output.last_hidden_state.to(torch.float16)
+                
+            inputs_t5 = self.t5_proj(query_output.last_hidden_state)
+            atts_t5 = torch.ones(inputs_t5.size()[:-1], dtype=torch.long).to(self.device)
+
+            encoder_atts = atts_t5
+            
+            # LoRA를 적용한 캡셔닝 모델 사용
+            output_tokens = self.caption_model.generate(
+                inputs_embeds=inputs_t5,
+                attention_mask=encoder_atts,
+                max_new_tokens=30,
+                min_length=5,
+                num_beams=5,
+            )
+            # # Use .generate() with torch.no_grad() to avoid tracking history
+            # with torch.no_grad():
+            #     output_tokens = self.t5_model.generate(
+            #         inputs_embeds=inputs_t5,
+            #         attention_mask=encoder_atts,
+            #         max_new_tokens=30,
+            #         min_length=5,
+            #         num_beams=5,
+            #     )
+                
+            pseudo_queries = [self.t5_tokenizer.decode(tokens, skip_special_tokens=True) for tokens in output_tokens]
+            
+            # ipdb.set_trace()
+            
+            # Pseudo query와 원본 query 간의 NLL loss 계산
+            pseudo_query_tokens = self.t5_tokenizer(
+                pseudo_queries,
+                padding="longest",
+                truncation=True,
+                max_length=self.max_txt_len,
+                return_tensors="pt",
+            ).to(image.device)
+            
+            cleaned_query_prompt = [q.replace("Query: ", "").strip() for q in query_prompt]
+
+            if samples.get('iters', 0) % 300 == 0:  # 50 배치마다 출력
+                print(f"Iteration {samples['iters']}:")
+                for i, (pseudo_query, query_prompt) in enumerate(zip(pseudo_queries, cleaned_query_prompt)):
+                    print(f"    Prompt Query: {query_prompt}")
+                    print(f"    Pseudo Query: {pseudo_query}")
+                print("-" * 50) 
+
+            original_query_tokens = self.t5_tokenizer(
+                cleaned_query_prompt,
+                padding="longest",
+                truncation=True,
+                max_length=self.max_txt_len,
+                return_tensors="pt",
+            ).to(image.device)
+
+            original_query_labels = original_query_tokens.input_ids.masked_fill(
+                original_query_tokens.input_ids == self.t5_tokenizer.pad_token_id, -100
+            )
+            
+            prompt_queries = [self.t5_tokenizer.decode(tokens, skip_special_tokens=True) for tokens in original_query_labels]
+
+            pseudo_query_loss = self.caption_model(
+                input_ids=pseudo_query_tokens.input_ids,
+                attention_mask=pseudo_query_tokens.attention_mask,
+                labels=original_query_labels,
+            ).loss
+
+            # Pseudo query를 이용한 추가 학습
+            pseudo_inputs_embs_mr, pseudo_inputs_atts_mr, _ = self.prompt_concatenation(
+                timestamps,
+                durations,
+                frames_for_t5,
+                frames_atts_for_t5,
+                video_prompt_end,
+                pseudo_queries,
+                task_prompt,
+            )
+            
+            pseudo_outputs_loc = self.t5_model(
+                inputs_embeds=pseudo_inputs_embs_mr,
+                attention_mask=pseudo_inputs_atts_mr,
+                decoder_attention_mask=output_tokens_mask_mr,
+                return_dict=True,
+                labels=targets_mr,
+            )
+            
+            # ipdb.set_trace()
+            
+            pseudo_loss = pseudo_outputs_loc.loss
+            
+            # 전체 loss 계산
+            loss = loss1 + 0.33 * pseudo_query_loss + pseudo_loss
+            
             # write the following to a wandb table
             if self.use_wandb and is_main_process():
                 log = {}
-                log["train/log_likelihood_loss"] = loss.item()
+                log["train/total_loss"] = loss.item()
+                log["train/loss1"] = loss1.item()
+                log["train/pseudo_query_loss"] = pseudo_query_loss.item()
+                log["train/loss2"] = pseudo_loss.item()
                 # Log images and predictions
                 if samples["iters"] % self.log_samples_every_n == 0:
                     pred = self.t5_tokenizer.batch_decode(
@@ -320,9 +484,9 @@ class BLIP2_MR(Blip2Base):
                     log.update(out)
                 # Log iteration
                 wandb.log(log)
-
-        return {"loss": loss}
-
+        return {"loss": loss, "output": outputs_loc, "loss1" : loss1,  "pseudo_query_loss": pseudo_query_loss, "pseudo_loss": pseudo_loss}
+        # return {"loss": loss, 'output': outputs_loc}
+    
     def prompt_concatenation(
         self,
         timestamps,
@@ -331,8 +495,8 @@ class BLIP2_MR(Blip2Base):
         frames_atts_for_t5,
         video_prompt_end,
         query_prompt,
-        task_prompt,
-    ):
+        task_prompt, 
+        ):
 
         ### video prompt
         # </vid> = <extra_id_0>\n
@@ -576,6 +740,7 @@ class BLIP2_MR(Blip2Base):
         return inputs_embs_mr, inputs_atts_mr, video_prompt
 
     @torch.no_grad()
+    
     def generate(
         self,
         samples,
@@ -583,12 +748,12 @@ class BLIP2_MR(Blip2Base):
         num_beams=5,
         max_length=30,
         min_length=1,
-        top_p=0.9,
+        # top_p=0.9,
         repetition_penalty=1.0,
         length_penalty=1.0,
         num_captions=1,
-        temperature=1,
-    ):
+        temperature=1,  
+        ):
         """
         Args:
             samples (dict): A dictionary containing the following keys:
@@ -617,7 +782,7 @@ class BLIP2_MR(Blip2Base):
         # uniform sampling
         b, t, c, w, h = image.shape
         image = image.reshape(-1, c, w, h)
-        with torch.cuda.amp.autocast(enabled=(self.device != torch.device("cpu"))):
+        with torch.amp.autocast('cuda',enabled=(self.device != torch.device("cpu"))):
             image_embeds = self.ln_vision(self.visual_encoder(image))  # bt, n, c
         _, n, _ = image_embeds.shape
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
@@ -652,7 +817,7 @@ class BLIP2_MR(Blip2Base):
         )  # b, t * n, c
         frames_atts_for_t5 = frames_atts_for_t5.reshape(b, -1)  # b, t * n
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda',dtype=torch.float32):
             inputs_embs_mr, inputs_atts_mr, video_prompt = self.prompt_concatenation(
                 timestamps,
                 durations,
@@ -662,13 +827,13 @@ class BLIP2_MR(Blip2Base):
                 query_prompt,
                 task_prompt,
             )
-
+            
             ### Apply moment retrieval prompt ######################################
             outputs = self.t5_model.generate(
                 inputs_embeds=inputs_embs_mr,
                 attention_mask=inputs_atts_mr,
                 do_sample=use_nucleus_sampling,
-                top_p=top_p,
+                # top_p=top_p,
                 temperature=temperature,
                 num_beams=num_beams,
                 max_new_tokens=max_length,
@@ -681,6 +846,9 @@ class BLIP2_MR(Blip2Base):
                 output_scores=True,
             )
 
+            # import ipdb
+            # ipdb.set_trace()
+            
             # tokenizer decode outputs
             pred_ans = self.t5_tokenizer.batch_decode(
                 outputs[0], skip_special_tokens=True
@@ -707,6 +875,8 @@ class BLIP2_MR(Blip2Base):
         out["raw_prediction"] = pred_ans
         out["answer"] = answer
         out["qid"] = qid
+        
+        # ipdb.set_trace()
 
         # write the following to a wandb table
         if self.use_wandb and is_main_process():
@@ -739,10 +909,11 @@ class BLIP2_MR(Blip2Base):
         answer_list=None,
         prompt="",
         length_penalty=-1,
-        **kwargs,
-    ):
+        **kwargs, 
+        ): 
+        
         image = samples["image"]
-        with torch.cuda.amp.autocast(enabled=(self.device != torch.device("cpu"))):
+        with torch.amp.autocast(enabled=('cuda',self.device != torch.device("cpu"))):
             image_embeds = self.ln_vision(self.visual_encoder(image))
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
             image.device
@@ -773,14 +944,14 @@ class BLIP2_MR(Blip2Base):
         encoder_atts = torch.cat([atts_t5, input_tokens.attention_mask], dim=1)
 
         device_type = "cuda" if "cuda" in str(self.device) else "cpu"
-        with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type=device_type, dtype=torch.float32):
             inputs_embeds = self.t5_model.encoder.embed_tokens(input_tokens.input_ids)
             inputs_embeds = torch.cat([inputs_t5, inputs_embeds], dim=1)
 
             outputs = self.t5_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=encoder_atts,
-                do_sample=False,
+                do_sample=True,
                 num_beams=num_beams,
                 max_new_tokens=max_len,
                 min_length=min_len,
@@ -906,8 +1077,7 @@ class BLIP2_MR(Blip2Base):
     def find_annoying_numbers(
         self,
         tokenizer=T5TokenizerFast.from_pretrained("google/flan-t5-xl"),
-        range_end=300,
-    ):
+        range_end=300,):
         """
         Find numbers that are tokenized in more than one token by the T5 tokenizer.
 
